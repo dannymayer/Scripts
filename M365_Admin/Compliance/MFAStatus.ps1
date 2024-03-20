@@ -1,267 +1,244 @@
 <#
-.Synopsis
-  Get the MFA status for all users or a single user.
+=============================================================================================
+Name:           Export Office 365 users' MFA status using Microsoft Graph PowerShell
+Description:    This script exports O365 users MFA status report to CSV file
+Version:        1.0
+Website:        o365reports.com
+Script by:      O365Reports Team
 
-.DESCRIPTION
-  This script will get the Azure MFA Status for your users. You can query all the users, admins only or a single user.
+Script Highlights :
+~~~~~~~~~~~~~~~~~
 
-	It will return the MFA Status, MFA type (
+1.	The script exports MFA status for all users. 
+2.	You can filter results based on MFA status. I.e., you can export MFA enabled/disabled users separately. 
+3.	Exports report to CSV file 
+4.	You can filter the result to display Licensed users alone. 
+5.	You can generate MFA report for sign-in allowed users only. 
+6.	Shows MFA registration done through Conditional Access and Security Defaults too.
+7.	Automatically installs Microsoft Graph PowerShell module (if not installed already) upon your confirmation. 
 
-.NOTES
-  Name: Get-MFAStatus
-  Author: R. Mens - LazyAdmin.nl
-  Version: 1.6
-  DateCreated: jan 2021
-  Purpose/Change: Added registered email and phonenumber
-	Thanks to: Anthony Bartolo
 
-.LINK
-  https://lazyadmin.nl
-
-.EXAMPLE
-  Get-MFAStatus
-
-  Get the MFA Status of all enabled and licensed users and check if there are an admin or not
-
-.EXAMPLE
-  Get-MFAStatus -UserPrincipalName 'johndoe@contoso.com','janedoe@contoso.com'
-
-  Get the MFA Status for the users John Doe and Jane Doe
-
-.EXAMPLE
-  Get-MFAStatus -withOutMFAOnly
-
-  Get only the licensed and enabled users that don't have MFA enabled
-
-.EXAMPLE
-  Get-MFAStatus -adminsOnly
-
-  Get the MFA Status of the admins only
-
-.EXAMPLE
-  Get-MsolUser -Country "NL" | ForEach-Object { Get-MFAStatus -UserPrincipalName $_.UserPrincipalName }
-
-  Get the MFA status for all users in the Country The Netherlands. You can use a similar approach to run this
-  for a department only.
-
-.EXAMPLE
-  Get-MFAStatus -withOutMFAOnly | Export-CSV c:\temp\userwithoutmfa.csv -noTypeInformation
-
-  Get all users without MFA and export them to a CSV file
+For detailed script execution: https://o365reports.com/2022/04/27/get-mfa-status-of-office-365-users-using-microsoft-graph-powershell
+============================================================================================
 #>
-[CmdletBinding(DefaultParameterSetName = "Default")]
-param(
-    [Parameter(
-        Mandatory = $false,
-        ParameterSetName = "UserPrincipalName",
-        HelpMessage = "Enter a single UserPrincipalName or a comma separted list of UserPrincipalNames",
-        Position = 0
-    )]
-    [string[]]$UserPrincipalName,
+Param
+(
+    [Parameter(Mandatory = $false)]
+    [switch]$CreateSession,
+    [switch]$MFAEnabled,
+    [switch]$MFADisabled,
+    [switch]$LicensedUsersOnly,
+    [switch]$SignInAllowedUsersOnly,
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertificateThumbprint
 
-    [Parameter(
-        Mandatory = $false,
-        ValueFromPipeline = $false,
-        ParameterSetName = "AdminsOnly"
-    )]
-    # Get only the users that are an admin
-    [switch]$adminsOnly = $false,
-
-    [Parameter(
-        Mandatory = $false,
-        ValueFromPipeline = $false,
-        ParameterSetName = "AllUsers"
-    )]
-    # Set the Max results to return
-    [int]$MaxResults = 10000,
-
-    [Parameter(
-        Mandatory = $false,
-        ValueFromPipeline = $false,
-        ParameterSetName = "Licensed"
-    )]
-    # Check only the MFA status of users that have license
-    [switch]$IsLicensed = $true,
-
-    [Parameter(
-        Mandatory = $false,
-        ValueFromPipeline = $true,
-        ValueFromPipelineByPropertyName = $true,
-        ParameterSetName = "withOutMFAOnly"
-    )]
-    # Get only the users that don't have MFA enabled
-    [switch]$withOutMFAOnly = $false,
-
-    [Parameter(
-        Mandatory = $false,
-        ValueFromPipeline = $false
-    )]
-    # Check if a user is an admin. Set to $false to skip the check
-    [switch]$listAdmins = $true
 )
+Function Connect_MgGraph
+{
+ #Check for module installation
+ $MsGraphBetaModule =  Get-Module Microsoft.Graph.Beta -ListAvailable
+ if($MsGraphBetaModule -eq $null)
+ { 
+    Write-host "Important: Microsoft Graph Beta module is unavailable. It is mandatory to have this module installed in the system to run the script successfully." 
+    $confirm = Read-Host Are you sure you want to install Microsoft Graph Beta module? [Y] Yes [N] No  
+    if($confirm -match "[yY]") 
+    { 
+        Write-host "Installing Microsoft Graph Beta module..."
+        Install-Module Microsoft.Graph.Beta -Scope CurrentUser -AllowClobber
+        Write-host "Microsoft Graph Beta module is installed in the machine successfully" -ForegroundColor Magenta 
+    } 
+    else
+    { 
+        Write-host "Exiting. `nNote: Microsoft Graph Beta module must be available in your system to run the script" -ForegroundColor Red
+        Exit 
+    } 
+ }
+ #Disconnect Existing MgGraph session
+ if($CreateSession.IsPresent)
+ {
+  Disconnect-MgGraph
+ }
+ #Connecting to MgGraph beta
+ Write-Host Connecting to Microsoft Graph...
+ if(($TenantId -ne "") -and ($ClientId -ne "") -and ($CertificateThumbprint -ne ""))  
+ {  
+  Connect-MgGraph  -TenantId $TenantId -AppId $ClientId -CertificateThumbprint $CertificateThumbprint 
+ }
+ else
+ {
+  Connect-MgGraph -Scopes "User.Read.All","UserAuthenticationMethod.Read.All"
+  }
+}
+Connect_MgGraph
+Write-Host "`nNote: If you encounter module related conflicts, run the script in a fresh PowerShell window.`n" -ForegroundColor Yellow
+if((Get-MgContext) -ne "")
+{
+ Write-Host Connected to Microsoft Graph PowerShell using (Get-MgContext).Account account -ForegroundColor Yellow
+}
+$ProcessedUserCount=0
+$ExportCount=0
+ #Set output file 
+ $ExportCSV=".\MfaStatusReport_$((Get-Date -format yyyy-MMM-dd-ddd` hh-mm` tt).ToString()).csv"
+  $Result=""  
+ $Results=@()
 
-
-
-# Connect to Msol
-if ((Get-Module -ListAvailable -Name MSOnline) -eq $null) {
-    Write-Host "MSOnline Module is required, do you want to install it?" -ForegroundColor Yellow
-
-    $install = Read-Host Do you want to install module? [Y] Yes [N] No
-    if ($install -match "[yY]") {
-        Write-Host "Installing MSOnline module" -ForegroundColor Cyan
-        Install-Module MSOnline -Repository PSGallery -AllowClobber -Force
+#Get all users
+Get-MgBetaUser -All -Filter "UserType eq 'Member'" | foreach {
+ $ProcessedUserCount++
+ $Name= $_.DisplayName
+ $UPN=$_.UserPrincipalName
+ $Department=$_.Department
+ if($_.AccountEnabled -eq $true)
+ {
+  $SigninStatus="Allowed"
+ }
+ else
+ {
+  $SigninStatus="Blocked"
+ }
+ if(($_.AssignedLicenses).Count -ne 0)
+ {
+  $LicenseStatus="Licensed"
+ }
+ else
+ {
+  $LicenseStatus="Unlicensed"
+ }   
+ $Is3rdPartyAuthenticatorUsed="False"
+ $MFAPhone="-"
+ $MicrosoftAuthenticatorDevice="-"
+ Write-Progress -Activity "`n     Processed users count: $ProcessedUserCount "`n"  Currently processing user: $Name"
+ [array]$MFAData=Get-MgBetaUserAuthenticationMethod -UserId $UPN
+ $AuthenticationMethod=@()
+ $AdditionalDetails=@()
+ 
+ foreach($MFA in $MFAData)
+ { 
+   Switch ($MFA.AdditionalProperties["@odata.type"]) 
+   { 
+    "#microsoft.graph.passwordAuthenticationMethod"
+    {
+     $AuthMethod     = 'PasswordAuthentication'
+     $AuthMethodDetails = $MFA.AdditionalProperties["displayName"] 
+    } 
+    "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod"  
+    { # Microsoft Authenticator App
+     $AuthMethod     = 'AuthenticatorApp'
+     $AuthMethodDetails = $MFA.AdditionalProperties["displayName"] 
+     $MicrosoftAuthenticatorDevice=$MFA.AdditionalProperties["displayName"]
     }
-    else {
-        Write-Error "Please install MSOnline module."
+    "#microsoft.graph.phoneAuthenticationMethod"                  
+    { # Phone authentication
+     $AuthMethod     = 'PhoneAuthentication'
+     $AuthMethodDetails = $MFA.AdditionalProperties["phoneType", "phoneNumber"] -join ' ' 
+     $MFAPhone=$MFA.AdditionalProperties["phoneNumber"]
+    } 
+    "#microsoft.graph.fido2AuthenticationMethod"                   
+    { # FIDO2 key
+     $AuthMethod     = 'Fido2'
+     $AuthMethodDetails = $MFA.AdditionalProperties["model"] 
+    }  
+    "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod" 
+    { # Windows Hello
+     $AuthMethod     = 'WindowsHelloForBusiness'
+     $AuthMethodDetails = $MFA.AdditionalProperties["displayName"] 
+    }                        
+    "#microsoft.graph.emailAuthenticationMethod"        
+    { # Email Authentication
+     $AuthMethod     = 'EmailAuthentication'
+     $AuthMethodDetails = $MFA.AdditionalProperties["emailAddress"] 
+    }               
+    "microsoft.graph.temporaryAccessPassAuthenticationMethod"   
+    { # Temporary Access pass
+     $AuthMethod     = 'TemporaryAccessPass'
+     $AuthMethodDetails = 'Access pass lifetime (minutes): ' + $MFA.AdditionalProperties["lifetimeInMinutes"] 
     }
-}
-
-if ((Get-Module -ListAvailable -Name MSOnline) -ne $null) {
-    if (-not (Get-MsolDomain -ErrorAction SilentlyContinue)) {
-        if ($Host.Version.Major -eq 7) {
-            Import-Module MSOnline -UseWindowsPowershell
-        }
-        Connect-MsolService
+    "#microsoft.graph.passwordlessMicrosoftAuthenticatorAuthenticationMethod" 
+    { # Passwordless
+     $AuthMethod     = 'PasswordlessMSAuthenticator'
+     $AuthMethodDetails = $MFA.AdditionalProperties["displayName"] 
+    }      
+    "#microsoft.graph.softwareOathAuthenticationMethod"
+    { 
+      $AuthMethod     = 'SoftwareOath'
+      $Is3rdPartyAuthenticatorUsed="True"
     }
+    
+   }
+   $AuthenticationMethod +=$AuthMethod
+   if($AuthMethodDetails -ne $null)
+   {
+    $AdditionalDetails +="$AuthMethod : $AuthMethodDetails"
+   }
+  }
+  #To remove duplicate authentication methods
+  $AuthenticationMethod =$AuthenticationMethod | Sort-Object | Get-Unique
+  $AuthenticationMethods= $AuthenticationMethod  -join ","
+  $AdditionalDetail=$AdditionalDetails -join ", "
+  $Print=1
+  #Determine MFA status
+  [array]$StrongMFAMethods=("Fido2","PhoneAuthentication","PasswordlessMSAuthenticator","AuthenticatorApp","WindowsHelloForBusiness")
+  $MFAStatus="Disabled"
+ 
+
+  foreach($StrongMFAMethod in $StrongMFAMethods)
+  {
+   if($AuthenticationMethod -contains $StrongMFAMethod)
+   {
+    $MFAStatus="Strong"
+    break
+   }
+  }
+
+  if(($MFAStatus -ne "Strong") -and ($AuthenticationMethod -contains "SoftwareOath"))
+  {
+   $MFAStatus="Weak"
+  }
+  #Filter result based on MFA status
+  if($MFADisabled.IsPresent -and $MFAStatus -ne "Disabled")
+  {
+   $Print=0
+  }
+  if($MFAEnabled.IsPresent -and $MFAStatus -eq "Disabled")
+  {
+   $Print=0
+  }
+
+  #Filter result based on license status
+  if($LicensedUsersOnly.IsPresent -and ($LicenseStatus -eq "Unlicensed"))
+  {
+   $Print=0
+  }
+
+  #Filter result based on signin status
+  if($SignInAllowedUsersOnly.IsPresent -and ($SigninStatus -eq "Blocked"))
+  {
+   $Print=0
+  }
+ 
+ if($Print -eq 1)
+ {
+  $ExportCount++
+  $Result=@{'Name'=$Name;'UPN'=$UPN;'Department'=$Department;'License Status'=$LicenseStatus;'SignIn Status'=$SigninStatus;'Authentication Methods'=$AuthenticationMethods;'MFA Status'=$MFAStatus;'MFA Phone'=$MFAPhone;'Microsoft Authenticator Configured Device'=$MicrosoftAuthenticatorDevice;'Is 3rd-Party Authenticator Used'=$Is3rdPartyAuthenticatorUsed;'Additional Details'=$AdditionalDetail} 
+  $Results= New-Object PSObject -Property $Result 
+  $Results | Select-Object Name,UPN,Department,'License Status','SignIn Status','Authentication Methods','MFA Status','MFA Phone','Microsoft Authenticator Configured Device','Is 3rd-Party Authenticator Used','Additional Details' | Export-Csv -Path $ExportCSV -Notype -Append
+ }
 }
-else {
-    Write-Error "Please install Msol module."
-}
 
-# Get all licensed admins
-$admins = $null
-
-if (($listAdmins) -or ($adminsOnly)) {
-    $admins = Get-MsolRole | % { $role = $_.name; Get-MsolRoleMember -RoleObjectId $_.objectid } | Where-Object { $_.isLicensed -eq $true } | select @{Name = "Role"; Expression = { $role } }, DisplayName, EmailAddress, ObjectId | Sort-Object -Property EmailAddress -Unique
-}
-
-# Check if a UserPrincipalName is given
-# Get the MFA status for the given user(s) if they exist
-if ($PSBoundParameters.ContainsKey('UserPrincipalName')) {
-    foreach ($user in $UserPrincipalName) {
-        try {
-            $MsolUser = Get-MsolUser -UserPrincipalName $user -ErrorAction Stop
-
-            $Method = ""
-            $MFAMethod = $MsolUser.StrongAuthenticationMethods | Where-Object { $_.IsDefault -eq $true } | Select-Object -ExpandProperty MethodType
-
-            If (($MsolUser.StrongAuthenticationRequirements) -or ($MsolUser.StrongAuthenticationMethods)) {
-                Switch ($MFAMethod) {
-                    "OneWaySMS" { $Method = "SMS token" }
-                    "TwoWayVoiceMobile" { $Method = "Phone call verification" }
-                    "TwoWayVoiceOffice" { $Method = "Workphone call verification" }
-                    "PhoneAppOTP" { $Method = "Hardware token or authenticator app" }
-                    "PhoneAppNotification" { $Method = "Authenticator app" }
-                }
-            }
-
-            [PSCustomObject]@{
-                DisplayName          = $MsolUser.DisplayName
-                UserPrincipalName    = $MsolUser.UserPrincipalName
-                isAdmin              = if ($listAdmins -and $admins.EmailAddress -match $MsolUser.UserPrincipalName) { $true } else { "-" }
-                MFAEnabled           = if ($MsolUser.StrongAuthenticationMethods) { $true } else { $false }
-                MFAType              = $Method
-                MFAEnforced          = if ($MsolUser.StrongAuthenticationRequirements) { $true } else { "-" }
-                "Email Verification" = if ($msoluser.StrongAuthenticationUserDetails.Email) { $msoluser.StrongAuthenticationUserDetails.Email } else { "-" }
-                "Registered phone"   = if ($msoluser.StrongAuthenticationUserDetails.PhoneNumber) { $msoluser.StrongAuthenticationUserDetails.PhoneNumber } else { "-" }
-            }
-        }
-        catch {
-            [PSCustomObject]@{
-                DisplayName       = " - Not found"
-                UserPrincipalName = $User
-                isAdmin           = $null
-                MFAEnabled        = $null
-            }
-        }
-    }
-}
-# Get only the admins and check their MFA Status
-elseif ($adminsOnly) {
-    foreach ($admin in $admins) {
-        $MsolUser = Get-MsolUser -ObjectId $admin.ObjectId | Sort-Object UserPrincipalName -ErrorAction Stop
-
-        $MFAMethod = $MsolUser.StrongAuthenticationMethods | Where-Object { $_.IsDefault -eq $true } | Select-Object -ExpandProperty MethodType
-        $Method = ""
-
-        If (($MsolUser.StrongAuthenticationRequirements) -or ($MsolUser.StrongAuthenticationMethods)) {
-            Switch ($MFAMethod) {
-                "OneWaySMS" { $Method = "SMS token" }
-                "TwoWayVoiceMobile" { $Method = "Phone call verification" }
-                "TwoWayVoiceOffice" { $Method = "Workphone call verification" }
-                "PhoneAppOTP" { $Method = "Hardware token or authenticator app" }
-                "PhoneAppNotification" { $Method = "Authenticator app" }
-            }
-        }
-
-        [PSCustomObject]@{
-            DisplayName                           = $MsolUser.DisplayName
-            UserPrincipalName                     = $MsolUser.UserPrincipalName
-            isAdmin                               = $true
-            "MFA Enabled"                         = if ($MsolUser.StrongAuthenticationMethods) { $true } else { $false }
-            "MFA Default Type"                    = $Method
-            "SMS token"                           = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "OneWaySMS") { $true } else { "-" }
-            "Phone call verification"             = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "TwoWayVoiceMobile") { $true } else { "-" }
-            "Hardware token or authenticator app" = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "PhoneAppOTP") { $true } else { "-" }
-            "Authenticator app"                   = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "PhoneAppNotification") { $true } else { "-" }
-            "Email Verification"                  = if ($msoluser.StrongAuthenticationUserDetails.Email) { $msoluser.StrongAuthenticationUserDetails.Email } else { "-" }
-            "Registered phone"                    = if ($msoluser.StrongAuthenticationUserDetails.PhoneNumber) { $msoluser.StrongAuthenticationUserDetails.PhoneNumber } else { "-" }
-            "Alternative phone"                   = if ($msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber) { $msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber } else { "-" }
-            MFAEnforced                           = if ($MsolUser.StrongAuthenticationRequirements) { $true } else { "-" }
-        }
-    }
-}
-# Get the MFA status from all the users
-else {
-    $MsolUsers = Get-MsolUser -EnabledFilter EnabledOnly -MaxResults $MaxResults | Where-Object { $_.IsLicensed -eq $isLicensed } | Sort-Object UserPrincipalName
-    foreach ($MsolUser in $MsolUsers) {
-
-        $MFAMethod = $MsolUser.StrongAuthenticationMethods | Where-Object { $_.IsDefault -eq $true } | Select-Object -ExpandProperty MethodType
-        $Method = ""
-
-        If (($MsolUser.StrongAuthenticationRequirements) -or ($MsolUser.StrongAuthenticationMethods)) {
-            Switch ($MFAMethod) {
-                "OneWaySMS" { $Method = "SMS token" }
-                "TwoWayVoiceMobile" { $Method = "Phone call verification" }
-                "TwoWayVoiceOffice" { $Method = "Workphone call verification" }
-                "PhoneAppOTP" { $Method = "Hardware token or authenticator app" }
-                "PhoneAppNotification" { $Method = "Authenticator app" }
-            }
-        }
-
-        if ($withOutMFAOnly) {
-            # List only the user that don't have MFA enabled
-            if (-not($MsolUser.StrongAuthenticationMethods)) {
-
-                [PSCustomObject]@{
-                    DisplayName          = $MsolUser.DisplayName
-                    UserPrincipalName    = $MsolUser.UserPrincipalName
-                    isAdmin              = if ($listAdmins -and ($admins.EmailAddress -match $MsolUser.UserPrincipalName)) { $true } else { "-" }
-                    "MFA Enabled"        = $false
-                    "MFA Type"           = "-"
-                    MFAEnforced          = if ($MsolUser.StrongAuthenticationRequirements) { $true } else { "-" }
-                    "Email Verification" = if ($msoluser.StrongAuthenticationUserDetails.Email) { $msoluser.StrongAuthenticationUserDetails.Email } else { "-" }
-                    "Registered phone"   = if ($msoluser.StrongAuthenticationUserDetails.PhoneNumber) { $msoluser.StrongAuthenticationUserDetails.PhoneNumber } else { "-" }
-                    "Alternative phone"  = if ($msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber) { $msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber } else { "-" }
-                }
-            }
-        }
-        else {
-            [PSCustomObject]@{
-                DisplayName                           = $MsolUser.DisplayName
-                UserPrincipalName                     = $MsolUser.UserPrincipalName
-                isAdmin                               = if ($listAdmins -and ($admins.EmailAddress -match $MsolUser.UserPrincipalName)) { $true } else { "-" }
-                "MFA Enabled"                         = if ($MsolUser.StrongAuthenticationMethods) { $true } else { $false }
-                "MFA Type"                            = $Method
-                "SMS token"                           = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "OneWaySMS") { $true } else { "-" }
-                "Phone call verification"             = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "TwoWayVoiceMobile") { $true } else { "-" }
-                "Hardware token or authenticator app" = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "PhoneAppOTP") { $true } else { "-" }
-                "Authenticator app"                   = if ($MsolUser.StrongAuthenticationMethods.MethodType -contains "PhoneAppNotification") { $true } else { "-" }
-                "Email Verification"                  = if ($msoluser.StrongAuthenticationUserDetails.Email) { $msoluser.StrongAuthenticationUserDetails.Email } else { "-" }
-                "Registered phone"                    = if ($msoluser.StrongAuthenticationUserDetails.PhoneNumber) { $msoluser.StrongAuthenticationUserDetails.PhoneNumber } else { "-" }
-                "Alternative phone"                   = if ($msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber) { $msoluser.StrongAuthenticationUserDetails.AlternativePhoneNumber } else { "-" }
-                MFAEnforced                           = if ($MsolUser.StrongAuthenticationRequirements) { $true } else { "-" }
-            }
-        }
-    }
-}
+if((Test-Path -Path $ExportCSV) -eq "True") 
+ {
+  Write-Host `nThe output file contains $ExportCount users.
+  Write-Host `nThe Output file available in the current working directory with name: -NoNewline -Foregroundcolor Yellow; Write-Host $ExportCSV
+  $Prompt = New-Object -ComObject wscript.shell   
+  $UserInput = $Prompt.popup("Do you want to open output file?",`
+ 0,"Open Output File",4)   
+  If ($UserInput -eq 6)   
+  {   
+   Invoke-Item "$ExportCSV"   
+  } 
+ }
+ else
+ {
+  Write-Host No users found.
+ }
