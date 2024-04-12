@@ -5,11 +5,19 @@
         "url": "https://ss64.com/",
         "name": "SS64 - Command Line Reference",
         "description": "A reference site for command line tools for Linux, macOS, PowerShell, Databases, and more."
-    }, {
+    },
+    {
         "id": "2",
         "date_added": "04022024",
         "url": "https://www.freecodecamp.org/",
         "name": "Free Code Camp",
         "description": "A non-profit educational site consisting of programming tutorials, developer interview tools, community forums, and online publications."
+    },
+    {
+        "id": "3",
+        "date_added": "04052024",
+        "url": "https://someonewhocares.org/hosts/",
+        "name": "Someone Who Care's Host File",
+        "description": "A maintained host file created by Dan Pollock that blocks known bad actors."
     }
 ]
